@@ -3,8 +3,6 @@
   
   <br>
   
-  <img src="img/logo.png" alt="ScoutRAG Logo" width="200">
-  
   <h1>ScoutRAG</h1>
   <p><strong>Assistant de scouting football basé sur l'IA générative</strong></p>
   
@@ -37,6 +35,8 @@ ScoutRAG est un assistant intelligent de scouting football qui révolutionne la 
 - **OpenAI GPT** : Modèle de langage pour la compréhension des requêtes
 - **Recherche vectorielle** : Analyse sémantique des données
 - **Pipeline RAG** : Retrieval-Augmented Generation pour des réponses précises
+- **Web Scraping** : Récupération de données depuis WhoScored
+- **Selenium** : Automatisation du navigateur pour le scraping
 - **Python** : Langage de développement principal
 
 ## 📋 Prérequis
@@ -71,7 +71,23 @@ ScoutRAG est un assistant intelligent de scouting football qui révolutionne la 
 
 ## 💡 Utilisation
 
-### Recherche de joueurs
+### Scraping de données depuis WhoScored
+
+```python
+# Scraper un joueur par nom
+from src.scrapers import WhoScoredScraper
+
+with WhoScoredScraper() as scraper:
+    # Rechercher un joueur
+    results = scraper.search_player("Kylian Mbappé")
+    
+    # Récupérer le profil complet
+    if results:
+        profile = scraper.get_player_profile(results[0]['url'])
+        print(f"Profil récupéré: {profile['name']}")
+```
+
+### Recherche de joueurs avec RAG
 
 ```python
 # Exemple de requête en langage naturel
@@ -92,6 +108,35 @@ resultats = scoutrag.rechercher_joueurs(requete)
 - "Attaquant rapide et technique, bon finisseur"
 - "Défenseur central expérimenté, bon dans les duels aériens"
 - "Gardien réactif avec de bons réflexes"
+
+## 🕷️ Scraping WhoScored
+
+### Script de scraping
+
+```bash
+# Lancer le script de scraping interactif
+python scripts/scrape_whoscored.py
+```
+
+### Fonctionnalités du scraper
+
+- **Recherche par nom** : Trouver des joueurs par leur nom
+- **Profil complet** : Récupérer toutes les données d'un joueur
+- **Scraping de ligue** : Récupérer les joueurs d'une ligue entière
+- **Intégration ScoutRAG** : Ajouter automatiquement les données à la base
+- **Sauvegarde JSON** : Exporter les données au format JSON
+
+### Exemples d'utilisation
+
+```python
+# Scraper un joueur spécifique
+scraper = WhoScoredScraper()
+results = scraper.search_player("Erling Haaland")
+profile = scraper.get_player_profile(results[0]['url'])
+
+# Scraper une ligue
+players = scraper.scrape_league_players("https://www.whoscored.com/Regions/252/Tournaments/2/England-Premier-League", 50)
+```
 
 ## 🤝 Contribution
 
