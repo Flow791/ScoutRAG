@@ -148,3 +148,6 @@ uploads/
 .env
 secrets.json
 config.json
+
+#other
+docker/qdrant_data
