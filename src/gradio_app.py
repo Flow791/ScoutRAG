@@ -4,8 +4,11 @@ import gradio as gr
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
+from qdrant_client.models import Filter, MatchAny, FieldCondition
 import re
 import unicodedata
+import numpy as np
+from rank_bm25 import BM25Okapi
 
 # Ajouter le répertoire parent au path pour importer config
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -24,6 +27,27 @@ class PlayerSearchApp:
         
         # Valider la configuration
         config.Config.validate()
+        
+        self._WORD_RE = re.compile(r"\w+", re.UNICODE)
+
+        # Patterns simples pour déduire l'intention (position/ligue/âge)
+        self.POS_PATTERNS = [
+            (r"\b(gardien|goalkeeper|keeper|gb)\b", "GK"),
+            (r"\b(défenseur central|defenseur central|central defender|centre[- ]back|dc)\b", "DF"),
+            (r"\b(lat[eé]ral|lateral|full[- ]?back|back)\b", "DF"),
+            (r"\b(milieu d[eé]fensif|6\b|defensive midfielder|dm)\b", "DM"),
+            (r"\b(milieu (central|relayeur)|8\b|central midfielder|cm)\b", "CM"),
+            (r"\b(meneur|num[eé]ro 10|numero 10|playmaker|am)\b", "AM"),
+            (r"\b(ailier|wing(er)?|wide)\b", "AM"),
+            (r"\b(avant[- ]centre|but(e)ur|buteur|striker|9\b|st)\b", "ST"),
+        ]
+        self.LEAGUE_MAP = {
+            "premier league": "Premier League",
+            "ligue 1": "Ligue 1",
+            "la liga": "La Liga",
+            "bundesliga": "Bundesliga",
+            "serie a": "Serie A",
+        }
         
     def extract_profil_type(self, summary: str) -> str | None:
         """Extrait le profil-type d'un résumé de joueur"""
@@ -51,6 +75,11 @@ class PlayerSearchApp:
         s = s.replace("duels aeriens", "aerien").replace("jeu entre les lignes", "entre-lignes")
         return set(s.split())
     
+    def _bm25_scores(self, query: str, docs: list[str]) -> np.ndarray:
+        corpus_tokens = [self._tok(d) for d in docs]
+        bm25 = BM25Okapi(corpus_tokens)
+        return np.array(bm25.get_scores(self._tok(query)))
+    
     def soft_label(self, ref_profil: str | None, cand_profil: str | None) -> int:
         """
         Calcule un score de similarité entre deux profils
@@ -63,6 +92,78 @@ class PlayerSearchApp:
         if len(self.canonical_tokens(ref_profil) & self.canonical_tokens(cand_profil)) >= 3:
             return 2
         return 1 if len(self.canonical_tokens(ref_profil) & self.canonical_tokens(cand_profil)) >= 2 else 0
+
+    def _infer_intent_from_query(self, query: str) -> dict:
+        """Déduit des contraintes légères à partir de la requête (position, ligue, âge max)."""
+        q = (query or "").lower()
+
+        # position
+        pos = None
+        for pat, code in self.POS_PATTERNS:
+            if re.search(pat, q):
+                pos = code
+                break
+
+        # âge max (U23, U21, "moins de 25", "<= 25")
+        age_max = None
+        m = re.search(r"u(\d{2})", q)
+        if m:
+            age_max = int(m.group(1))
+        else:
+            m = re.search(r"(?:moins de|under|<=)\s*(\d{2})", q)
+            if m:
+                age_max = int(m.group(1))
+
+        # ligue
+        league = None
+        for k, v in self.LEAGUE_MAP.items():
+            if k in q:
+                league = v
+                break
+
+        return {
+            "position_std": pos,
+            "age_max": age_max,
+            "league": league,
+        }
+
+    def _make_qdrant_filter(self, intent: dict) -> Filter | None:
+        """Construit un filtre Qdrant léger (actuellement sur position_std si détectée)."""
+        must = []
+        if intent.get("position_std"):
+            must.append(
+                FieldCondition(
+                    key="position_std",
+                    match=MatchAny(any=[intent["position_std"]])
+                )
+            )
+        if not must:
+            return None
+        return Filter(must=must)
+
+    def _tok(self, s: str):
+        return self._WORD_RE.findall((s or "").lower())
+
+    def _normalize_0_1(self, arr):
+        arr = np.asarray(arr, dtype=float)
+        if arr.size == 0:
+            return arr
+        mn, mx = float(np.min(arr)), float(np.max(arr))
+        if mx - mn < 1e-12:
+            return np.zeros_like(arr)  # tous égaux => neutre
+        return (arr - mn) / (mx - mn + 1e-9)
+
+    def _bm25_scores(self, query: str, docs: list[str]) -> np.ndarray:
+        corpus_tokens = [self._tok(d) for d in docs]
+        bm25 = BM25Okapi(corpus_tokens)
+        return np.array(bm25.get_scores(self._tok(query)))
+
+    def extract_profil_type(self, summary: str) -> str | None:
+        if not summary:
+            return None
+        
+        m = re.search(r"Profil-type\s*:\s*(.+)", summary, flags=re.IGNORECASE)
+        return m.group(1).strip() if m else None
     
     def search_players(self, query: str, top_k: int = 5) -> list:
         """
@@ -82,39 +183,97 @@ class PlayerSearchApp:
             # Encoder la requête
             query_vector = self.embedding_model.encode(query).tolist()
             
-            # Rechercher dans Qdrant
+            # Intention et filtre (optionnel)
+            intent = self._infer_intent_from_query(query)
+            qdrant_filter = self._make_qdrant_filter(intent)
+
+            # Rechercher dans Qdrant (pool élargi pour reranking hybride)
+            dense_top_n = max(top_k * 5, 50)
             results = self.qdrant_client.query_points(
                 collection_name=self.collection_name,
                 query=query_vector,
-                limit=top_k
+                limit=dense_top_n,
+                query_filter=qdrant_filter,
+                with_payload=True
             )
             
-            players = []
+            candidates = []
             for point in results.points:
                 payload = point.payload or {}
-                player_name = payload.get('player', 'Nom inconnu')
+                name = payload.get('player', 'Nom inconnu')
                 summary = payload.get('summary', 'Aucune description disponible')
-                profil_type = self.extract_profil_type(summary)
-                
-                # Calculer un score de pertinence basé sur la similarité des profils
-                relevance_score = self.soft_label(query, profil_type)
-                
-                # Tronquer le résumé pour l'affichage
-                short_summary = summary #[:300] + "..." if len(summary) > 300 else summary
-                
-                players.append({
-                    'name': player_name,
-                    'profil_type': profil_type or 'Profil non spécifié',
-                    'summary': short_summary,
-                    'full_summary': summary,
-                    'relevance_score': relevance_score,
-                    'similarity_score': point.score
+                short_summary = summary[:300] + "..." if len(summary) > 300 else summary
+                profil_type = self.extract_profil_type(summary) or ""
+                candidates.append({
+                    "name": name,
+                    "profil_type": profil_type,
+                    "short_summary": short_summary,
+                    "summary": summary,
+                    "similarity_score_raw": float(point.score),
+                    "position_std": payload.get("position_std", "UNK"),
+                    "league": payload.get("league"),
+                    "age": payload.get("age"),
+                    "age_bucket": payload.get("age_bucket")
                 })
-            
-            # Trier par score de pertinence puis par score de similarité
-            players.sort(key=lambda x: (x['relevance_score'], x['similarity_score']), reverse=True)
-            
-            return players
+
+            if not candidates:
+                return []
+
+            # BM25 sur (profil_type + résumé)
+            bm25_docs = [
+                f"{c['profil_type']} {c['summary']}".strip() for c in candidates
+            ]
+            bm25_scores = self._bm25_scores(query, bm25_docs)
+
+            # Normalisation des signaux
+            dense_scores = np.array([c['similarity_score_raw'] for c in candidates], dtype=float)
+            dense_norm = self._normalize_0_1(dense_scores)
+            bm25_norm = self._normalize_0_1(bm25_scores)
+
+            # Fusion (alpha réglable)
+            alpha = 0.75
+            fused = alpha * dense_norm + (1.0 - alpha) * bm25_norm
+
+            # Boosts en fonction de l'intention
+            boosts = np.zeros_like(fused)
+            for i, c in enumerate(candidates):
+                b = 0.0
+                if intent.get('position_std') and c.get('position_std') == intent['position_std']:
+                    b += 0.03
+                if intent.get('league') and c.get('league') == intent['league']:
+                    b += 0.02
+                if intent.get('age_max') and c.get('age') is not None:
+                    try:
+                        if int(c['age']) <= int(intent['age_max']):
+                            b += 0.02
+                    except Exception:
+                        pass
+                boosts[i] = b
+
+            fused = fused + boosts
+
+            # Ordonnancement par score fusionné
+            order = np.argsort(-fused)
+            ranked = []
+            for idx in order[:top_k]:
+                c = candidates[idx]
+                full_summary = c['summary']
+                short_summary = full_summary[:300] + "..." if len(full_summary) > 300 else full_summary
+                ranked.append({
+                    'name': c['name'],
+                    'profil_type': c['profil_type'] or 'Profil non spécifié',
+                    'short_summary': short_summary,
+                    'summary': full_summary,
+                    'similarity_score': float(c['similarity_score_raw']),
+                    'bm25_score': float(bm25_norm[idx]),
+                    'fused_score': float(fused[idx]),
+                    'dense_score': float(dense_norm[idx]),
+                    'position_std': c.get('position_std', ''),
+                    'league': c.get('league'),
+                    'age': c.get('age'),
+                })
+
+            return ranked
             
         except Exception as e:
             print(f"Erreur lors de la recherche: {e}")
@@ -122,16 +281,19 @@ class PlayerSearchApp:
     
     def format_player_result(self, player: dict, index: int) -> str:
         """Formate un résultat de joueur pour l'affichage"""
-        score_emoji = "🟢" if player['relevance_score'] >= 2 else "🟡" if player['relevance_score'] >= 1 else "🔴"
+        s = player.get("fused_score", 0.0)
+        score_emoji = "🟢" if s >= 0.66 else ("🟡" if s >= 0.33 else "🔴")
         
         return f"""
-### {score_emoji} {index}. {player['name']}
+### {score_emoji} {index}. {player['name']} ({player['position_std']}) - {player['age']} ans
 
 **Profil-type:** {player['profil_type']}
 
-**Description:** {player['summary']}
+**Description:** {player['short_summary']}
 
-**Score de pertinence:** {player['relevance_score']}/3 | **Score de similarité:** {player['similarity_score']:.3f}
+**Similar score :** {player['similarity_score']:.3f}
+
+**Tri hybride:** fused=**{player.get('fused_score', 0):.3f}** | dense={player.get('dense_score', 0):.3f} | bm25={player.get('bm25_score', 0):.3f}
 
 ---
 """

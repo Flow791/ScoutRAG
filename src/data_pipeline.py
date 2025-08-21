@@ -11,7 +11,7 @@ import soccerdata as sd
 from pathlib import Path
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, PayloadSchemaType
 from tqdm import tqdm
 import time
 from openai import OpenAI
@@ -301,6 +301,36 @@ class ScoutRAGPipeline:
         )
         
         print("✅ Collection Qdrant configurée")
+        
+        
+    FBREF_TO_STD = {
+        "GK": "GK",
+        "DF": "DF",
+        "DF,MF": "DM",
+        "MF,DF": "DM",
+        "MF": "CM",
+        "MF,FW": "AM",
+        'FW,MF': 'AM',
+        "FW": "ST",
+        'DF,FW': 'DF',
+        'FW,DF': 'DF'
+    }
+
+    def normalize_position(self, raw_pos: str) -> str:
+        if not raw_pos:
+            return "UNK"
+        raw = raw_pos.strip().upper()
+        return self.FBREF_TO_STD.get(raw, raw[:2])
+
+    def age_bucket(self, age: int) -> str:
+        if age is None:
+            return "unknown"
+        if age <= 21: return "U21"
+        if age <= 23: return "U23"
+        if age <= 25: return "U25"
+        if age <= 28: return "U28"
+        if age <= 32: return "U32"
+        return "32+"
     
     def step_5_store_embeddings(self, df_final):
         """Étape 5: Stockage des embeddings dans Qdrant"""
@@ -312,16 +342,30 @@ class ScoutRAGPipeline:
         for idx, row in tqdm(df_final.iterrows(), total=len(df_final), desc="Embeddings"):
             try:
                 # Générer l'embedding
-                embedding = self.embedding_model.encode(row['summary']).tolist()
+                embedding = self.embedding_model.encode(
+                    row['summary'],
+                    normalize_embeddings=True
+                ).tolist()
                 
-                # Préparer les métadonnées
+                pos_std = self.normalize_position(getattr(row, "position", ""))
+                nat = getattr(row, "nationality", "")
+                age = getattr(row, "age", None)
+                try:
+                    age = int(age) if age is not None and str(age).isdigit() else None
+                except:
+                    age = None
+                
                 metadata = {
                     'season': row['season'],
                     'player': row['player'],
+                    'position_std': pos_std,
+                    'age': age,
+                    'age_bucket': self.age_bucket(age),
+                    'nationality': nat,
                     'league': row['league'],
                     'team': row['team'],
                     'position': row['position'],
-                    'summary': row['summary']
+                    'summary': row['summary'],
                 }
                 
                 # Créer le point
@@ -347,6 +391,32 @@ class ScoutRAGPipeline:
                 collection_name=self.collection_name, 
                 points=batch
             )
+            
+        self.qdrant_client.create_payload_index(
+            collection_name="ragscout_players",
+            field_name="position_std",
+            field_schema=PayloadSchemaType.KEYWORD,
+        )
+        self.qdrant_client.create_payload_index(
+            collection_name="ragscout_players",
+            field_name="league",
+            field_schema=PayloadSchemaType.KEYWORD,
+        )
+        self.qdrant_client.create_payload_index(
+            collection_name="ragscout_players",
+            field_name="season",
+            field_schema=PayloadSchemaType.INTEGER,
+        )
+        self.qdrant_client.create_payload_index(
+            collection_name="ragscout_players",
+            field_name="age",
+            field_schema=PayloadSchemaType.INTEGER,
+        )
+        self.qdrant_client.create_payload_index(
+            collection_name="ragscout_players",
+            field_name="age_bucket",
+            field_schema=PayloadSchemaType.KEYWORD,
+        )
         
         print(f"✅ {len(points)} joueurs insérés dans Qdrant")
     

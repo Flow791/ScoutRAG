@@ -14,30 +14,152 @@
 
 ---
 
-## 🚀 Installation et Configuration Automatisées
+## 🇬🇧 Quick Overview (English)
 
-### Option 1: Setup Complet Automatisé (Recommandé)
+### About ScoutRAG
+ScoutRAG is an AI-powered football scouting assistant. Describe a player profile in natural language and retrieve the most relevant players via semantic search.
+
+- Retrieval-Augmented approach: SentenceTransformer embeddings (BAAI/bge-m3) + vector DB (Qdrant)
+- Gradio web UI for fast search in French or English
+- Optional end-to-end data pipeline: fetch FBref stats → generate player summaries with OpenAI → index into Qdrant
+
+### Key Features
+- Natural-language search for player profiles
+- Modern web UI (Gradio)
+- Vector search with cosine similarity
+- Automated pipeline to (re)build the index
+- RAG evaluation notebooks (nDCG, LLM-as-judge)
+
+### Tech Stack
+- Embeddings: SentenceTransformer "BAAI/bge-m3" (1024 dims)
+- Vector DB: Qdrant (`ragscout_players`, cosine)
+- LLM: OpenAI (`OPENAI_MODEL`, default `gpt-4o-mini`) for summary generation
+- UI: Gradio (`src/gradio_app.py`)
+- Pipeline: `src/data_pipeline.py` (FBref → summaries → Qdrant)
+
+### Prerequisites
+- Python 3.8+
+- Docker + Docker Compose
+- OpenAI API key
+
+## ⚡ Quick Start (EN)
 
 ```bash
-# Cloner le projet
-git clone <repository-url>
-cd ScoutRAG
+# (optional) activate pyenv env if available
+pyenv shell scout_rag_env
 
-# Lancer le setup automatisé
-python setup_scoutrag.py
+# 1) Install deps
+pip install -r requirements.txt
+
+# 2) Start Qdrant (vector DB)
+cd docker && docker-compose up -d && cd ..
+
+# 3) Launch Gradio app
+python run_app.py
+# if 7860 is taken:
+GRADIO_SERVER_PORT=7861 python run_app.py
+
+# 4) Open browser: http://localhost:7860
+
+# 5) (optional) Rebuild data and index (long)
+cd src && python data_pipeline.py
 ```
 
-Le script `setup_scoutrag.py` va automatiquement :
-- ✅ Vérifier les prérequis (Docker, Python)
-- ✅ Installer toutes les dépendances
-- ✅ Configurer l'environnement
-- ✅ Démarrer Qdrant
-- ✅ Exécuter le pipeline de données (optionnel)
-- ✅ Tester l'application
+Useful commands:
+- Check Qdrant: `docker ps | grep qdrant`
+- List collections: `curl -s http://localhost:6333/collections`
 
-### Option 2: Installation Manuelle
+## 🚀 Automated Setup (EN)
 
-Si vous préférez une installation manuelle, suivez les étapes ci-dessous.
+```bash
+python setup_scoutrag.py
+```
+This script checks prerequisites, installs dependencies, starts Qdrant, optionally runs the data pipeline, and tests the app.
+
+## 🚀 Manual Installation (EN)
+```bash
+git clone <repository-url>
+cd ScoutRAG
+pip install -r requirements.txt
+cd docker && docker-compose up -d && cd ..
+python run_app.py
+```
+
+## 🔄 Data Pipeline (EN) – Detailed
+
+The end-to-end pipeline fetches stats, generates player summaries, computes embeddings, and stores everything into Qdrant.
+
+### Overview
+- Source: FBref via `soccerdata` (Big 5 European Leagues Combined)
+- Season: 2024/25 (configurable in `src/data_pipeline.py`)
+- Stat types: `standard`, `shooting`, `passing`, `defense`, `possession`, `misc`
+- Embeddings: `SentenceTransformer("BAAI/bge-m3")` (1024 dimensions)
+- Vector DB: Qdrant (`ragscout_players`, cosine distance)
+
+### Steps
+1) Fetch & merge stats → writes `data/players_stats.csv`
+2) Generate player summaries with OpenAI (French), each ending with a line `Profil-type : …` → writes/updates `data/player_summaries.json`
+3) Prepare dataset: merge stats + summaries, select columns `[league, season, player, team, position, summary]`
+4) Qdrant setup: drop existing collection (if any), recreate `ragscout_players` with size 1024 + cosine
+5) Encode summaries (BAAI/bge-m3) and upsert in batches (default 100) with payload:
+   - `season, player, league, team, position, summary`
+
+### Run
+```bash
+cd src
+python data_pipeline.py
+```
+Requirements: `.env` with `OPENAI_API_KEY`. Note that generating thousands of summaries can take hours; consider running on a subset for quick tests.
+
+## 📈 RAG Evaluation (EN)
+
+Evaluation is provided in `src/notebooks/rag_evaluation.ipynb`:
+- Generate realistic search queries from player summaries (OpenAI) and store them in `data/player_queries.json`
+- Compute nDCG@k with graded gains:
+  - 4 = exact expected player
+  - 3 = equal profile (after normalization)
+  - 2/1 = strong/weak token overlap on the extracted `Profil-type`
+- “LLM as judge”: retrieve top-K candidates, ask the LLM to score relevance in {0,1,2,3}, then compute nDCG
+
+Observed results (indicative): nDCG@3 ≈ 0.93, LLM-judge nDCG@5 ≈ 0.918.
+
+## 📁 Project Structure (EN)
+
+```
+ScoutRAG/
+├── src/
+│   ├── gradio_app.py          # Gradio web app (semantic search)
+│   ├── data_pipeline.py       # End-to-end data pipeline
+│   ├── config.py              # App configuration (.env)
+│   └── notebooks/
+│       ├── scrapping_fbref.ipynb
+│       ├── player_embedding.ipynb
+│       ├── player_description.ipynb
+│       └── rag_evaluation.ipynb
+├── docker/
+│   └── docker-compose.yaml    # Qdrant service
+├── data/                      # Generated data
+├── run_app.py                 # Launch Gradio interface
+├── setup_scoutrag.py          # Automated setup (optional)
+└── requirements.txt           # Dependencies
+```
+
+## 🛠 Useful Commands (EN)
+
+```bash
+# Start Qdrant
+cd docker && docker-compose up -d
+
+# Launch app (change port if needed)
+python run_app.py
+GRADIO_SERVER_PORT=7861 python run_app.py
+
+# Rebuild pipeline (long)
+cd src && python data_pipeline.py
+
+# Inspect Qdrant
+curl -s http://localhost:6333/collections
+```
 
 ---
 
@@ -76,6 +198,61 @@ ScoutRAG est un assistant intelligent de scouting football qui révolutionne la 
 - Docker et Docker Compose
 - Clé API OpenAI
 - Connexion internet pour la récupération des données
+
+
+## ⚡ Quick Start
+
+```bash
+# (facultatif) activer l'env pyenv si disponible
+pyenv shell scout_rag_env
+
+# 1) Installer les dépendances
+pip install -r requirements.txt
+
+# 2) Démarrer Qdrant (base vectorielle)
+cd docker && docker-compose up -d && cd ..
+
+# 3) Lancer l'interface Gradio
+python run_app.py
+# si le port 7860 est pris :
+GRADIO_SERVER_PORT=7861 python run_app.py
+
+# 4) Ouvrir le navigateur
+# http://localhost:7860
+
+# 5) (optionnel) Recréer les données et index (long)
+cd src && python data_pipeline.py
+```
+
+Commandes utiles:
+- Vérifier Qdrant: `docker ps | grep qdrant`
+- Voir la collection: `curl -s http://localhost:6333/collections`
+
+
+## 🚀 Installation et Configuration Automatisées
+
+### Option 1: Setup Complet Automatisé (Recommandé)
+
+```bash
+# Cloner le projet
+git clone <repository-url>
+cd ScoutRAG
+
+# Lancer le setup automatisé
+python setup_scoutrag.py
+```
+
+Le script `setup_scoutrag.py` va automatiquement :
+- ✅ Vérifier les prérequis (Docker, Python)
+- ✅ Installer toutes les dépendances
+- ✅ Configurer l'environnement
+- ✅ Démarrer Qdrant
+- ✅ Exécuter le pipeline de données (optionnel)
+- ✅ Tester l'application
+
+### Option 2: Installation Manuelle
+
+Si vous préférez une installation manuelle, suivez les étapes ci-dessous.
 
 ## 🚀 Installation Manuelle
 
@@ -206,28 +383,6 @@ ScoutRAG/
 └── requirements.txt           # Dépendances Python
 ```
 
-## 🤝 Contribution
-
-Les contributions sont les bienvenues ! N'hésitez pas à :
-
-1. Fork le projet
-2. Créer une branche pour votre fonctionnalité (`git checkout -b feature/AmazingFeature`)
-3. Commit vos changements (`git commit -m 'Add some AmazingFeature'`)
-4. Push vers la branche (`git push origin feature/AmazingFeature`)
-5. Ouvrir une Pull Request
-
-## 📄 Licence
-
-Ce projet est sous licence MIT. Voir le fichier [LICENSE](LICENSE) pour plus de détails.
-
-## 📞 Support
-
-Pour toute question ou suggestion :
-- Ouvrir une [issue](https://github.com/votre-username/ScoutRAG/issues)
-- Consulter la documentation : `APP_README.md`
-- Contacter l'équipe de développement
-
----
 
 <div align="center">
   <p>Développé avec ❤️ pour la communauté football</p>
